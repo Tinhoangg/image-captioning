@@ -6,6 +6,7 @@ import torch
 from torchvision import models
 import torch.nn as nn
 import torch.optim as optim
+from model import Encoder, Decoder
 # SETUP
 BATCH_SIZE = 32
 PAD_IDX = 0
@@ -44,8 +45,33 @@ test_loader = DataLoader(test_data, batch_size=BATCH_SIZE,
 # Hyperparameters 
 embed_size = 256
 hidden_dim = 512
-vocabsize = len(w2i)
+vocab_size = len(w2i)
 num_epochs = 5
-device = torch.device("cuda"if torch.cuda.is_available else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Model, Loss, Optimizer
+encoder = Encoder(embed_size=embed_size).to(device)
+decoder = Decoder(embed_size,vocab_size)
+criterian = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+params = list(decoder.parameters()) + list(encoder.linear.parameters()) + list(encoder.bn.parameters())
+optimizer = optim.AdamW(params, lr=1e-3)
+
+# Training loop
+for epoch in range(num_epochs):
+    encoder.train()
+    decoder.train()
+    for i, (images, captions) in enumerate(train_loader):
+        images = images.to(device)
+        captions = captions.to(device)
+        
+        optimizer.zero_grad()
+        tgt_input = captions[:, :-1].transpose(0, 1) # (seq_len, B)
+        target = captions[:, 1:].reshape(-1) # (seq_len*B)
+
+        output = decoder(tgt_input, encoder(images))
+        loss = criterian(output.reshape(-1, vocab_size), target)
+        loss.backward()
+        optimizer.step()
+
+        if i % 100 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(train_loader)}], Loss: {loss.item():.4f}")
