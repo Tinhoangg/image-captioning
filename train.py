@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.optim as optim
-from model import Encoder, Decoder
+from model import ViTEncoder, Decoder
 from dataset import CaptionDataset
 import json
 from tqdm import tqdm
@@ -45,7 +45,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 print(f"Vocabulary size: {len(w2i)}")
 
-encoder = Encoder(embed_dim=EMBED_SIZE).to(device)
+encoder = ViTEncoder(embed_dim=EMBED_SIZE).to(device)
 decoder = Decoder(embed_dim=EMBED_SIZE, vocab_size=len(w2i)).to(device)
 
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
