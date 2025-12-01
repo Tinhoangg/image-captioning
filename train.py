@@ -26,11 +26,11 @@ with open("data/word2idx.json", "r", encoding="utf-8") as f:
 # Tạo idx2word để decode predictions
 idx2w = {v: k for k, v in w2i.items()}
 
-train_data = CaptionDataset("data/processed/train",
+train_data = CaptionDataset("caption_img/processed/train",
                             captions_json, w2i)
-val_data = CaptionDataset("data/processed/val",
+val_data = CaptionDataset("caption_img/processed/val",
                             captions_json, w2i)
-test_data = CaptionDataset("data/processed/test",
+test_data = CaptionDataset("caption_img/processed/test",
                             captions_json, w2i)
 
 # split batch
