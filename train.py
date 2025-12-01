@@ -3,8 +3,8 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.optim as optim
-from model import ViTEncoder, Decoder
 from dataset import CaptionDataset
+from model import ViTEncoder as Encoder, Decoder
 import json
 from tqdm import tqdm
 import warnings
@@ -45,13 +45,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 print(f"Vocabulary size: {len(w2i)}")
 
-encoder = ViTEncoder(embed_dim=EMBED_SIZE).to(device)
+encoder = Encoder(embed_dim=EMBED_SIZE).to(device)
 decoder = Decoder(embed_dim=EMBED_SIZE, vocab_size=len(w2i)).to(device)
 
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
 optimizer = optim.AdamW(list(decoder.parameters()) +
-                        list(encoder.linear.parameters()) +
-                        list(encoder.bn.parameters()), lr=3e-4)
+                        list(encoder.proj.parameters()), lr=3e-4)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
 
 best_val_loss = float('inf')
@@ -71,7 +70,11 @@ for epoch in range(NUM_EPOCHS):
         tgt_input = captions[:, :-1].transpose(0,1)   # (seq_len, B)
         target = captions[:, 1:].reshape(-1)          # flatten
 
-        output = decoder(tgt_input, encoder(images))
+        # ===================== Sửa memory shape =====================
+        memory = encoder(images)  # (B, embed_dim)
+        memory = memory.unsqueeze(0)  # (1, B, embed_dim) để phù hợp transformer
+
+        output = decoder(tgt_input, memory.squeeze(0))
         loss = criterion(output.reshape(-1, len(w2i)), target)
         loss.backward()
         optimizer.step()
@@ -81,7 +84,7 @@ for epoch in range(NUM_EPOCHS):
     
     avg_train_loss = train_loss / len(train_loader)
 
-    # Validation
+    # ===================== Validation =====================
     encoder.eval()
     decoder.eval()
     val_loss = 0
@@ -93,7 +96,10 @@ for epoch in range(NUM_EPOCHS):
             tgt_input = captions[:, :-1].transpose(0,1)
             target = captions[:, 1:].reshape(-1)
 
-            output = decoder(tgt_input, encoder(images))
+            memory = encoder(images)
+            memory = memory.unsqueeze(0)
+
+            output = decoder(tgt_input, memory.squeeze(0))
             loss = criterion(output.reshape(-1, len(w2i)), target)
             val_loss += loss.item()
     avg_val_loss = val_loss / len(val_loader)
@@ -101,7 +107,7 @@ for epoch in range(NUM_EPOCHS):
 
     print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}] Train Loss: {avg_train_loss:.4f} Val Loss: {avg_val_loss:.4f}")
 
-    # Save best model
+    # ===================== Save best model =====================
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
         torch.save({
