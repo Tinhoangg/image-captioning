@@ -19,8 +19,8 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 BATCH_SIZE = 32
 PAD_IDX = 0
 
-captions_json = "data/captions_img.json"
-with open("data/word2idx.json", "r", encoding="utf-8") as f:
+captions_json = "caption-img/captions_img.json"
+with open("caption-img/word2idx.json", "r", encoding="utf-8") as f:
     w2i = json.load(f)
 
 # Tạo idx2word để decode predictions
