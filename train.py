@@ -19,18 +19,18 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 BATCH_SIZE = 32
 PAD_IDX = 0
 
-captions_json = "caption-img/captions_img.json"
-with open("caption-img/word2idx.json", "r", encoding="utf-8") as f:
+captions_json = "/kaggle/input/caption-img/captions_img.json"
+with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f:
     w2i = json.load(f)
 
 # Tạo idx2word để decode predictions
 idx2w = {v: k for k, v in w2i.items()}
 
-train_data = CaptionDataset("caption_img/processed/train",
+train_data = CaptionDataset("/kaggle/input/caption_img/processed/train",
                             captions_json, w2i)
-val_data = CaptionDataset("caption_img/processed/val",
+val_data = CaptionDataset("/kaggle/input/caption_img/processed/val",
                             captions_json, w2i)
-test_data = CaptionDataset("caption_img/processed/test",
+test_data = CaptionDataset("/kaggle/input/caption_img/processed/test",
                             captions_json, w2i)
 
 # split batch
