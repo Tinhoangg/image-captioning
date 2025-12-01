@@ -26,11 +26,11 @@ with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f
 # Tạo idx2word để decode predictions
 idx2w = {v: k for k, v in w2i.items()}
 
-train_data = CaptionDataset("/kaggle/input/caption_img/processed/train",
+train_data = CaptionDataset("/kaggle/input/caption-img/processed/train",
                             captions_json, w2i)
-val_data = CaptionDataset("/kaggle/input/caption_img/processed/val",
+val_data = CaptionDataset("/kaggle/input/caption-img/processed/val",
                             captions_json, w2i)
-test_data = CaptionDataset("/kaggle/input/caption_img/processed/test",
+test_data = CaptionDataset("/kaggle/input/caption-img/processed/test",
                             captions_json, w2i)
 
 # split batch
