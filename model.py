@@ -2,90 +2,78 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
-
-# ENCODER (ViT)
-class ViTEncoder(nn.Module):
-    def __init__(self, embed_dim=512, train_last_block=False):
+class Encoder(nn.Module):
+    def __init__(self, embed_dim=512, train_cnn=False):
         super().__init__()
 
-        vit = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
+        # load resnet50 pre-trained model
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
 
-        # remove classification head
-        vit.heads = nn.Identity()
-        self.vit = vit
+        # remove last fc layer
+        self.cnn = nn.Sequential(*list(resnet.children())[:-1]) # output(B,2048,1,1)
 
-        # freeze toàn bộ backbone
-        for p in self.vit.parameters():
-            p.requires_grad = False
+        # Linear projection 2048 -> embed dim
+        self.fc = nn.Linear(2048, embed_dim)
+        self.bn = nn.BatchNorm1d(embed_dim, momentum=0.01)
+        self.relu = nn.ReLU()
 
-        # nếu muốn train block cuối
-        if train_last_block:
-            for p in self.vit.encoder.layers[-1].parameters():
-                p.requires_grad = True
-
-        # ViT output = 768 → project về embed_dim
-        self.proj = nn.Linear(768, embed_dim)
-
+        # freeze cnn layer
+        for p in self.cnn.parameters():
+            p.requires_grad = train_cnn
     def forward(self, images):
-        feat = self.vit(images)          # [B, 768]
-        feat = self.proj(feat)           # [B, embed_dim]
-        return feat.unsqueeze(1)         # [B, 1, embed_dim] 
-
-
-# DECODER (Transformer)
-class TransformerCaptionDecoder(nn.Module):
-    def __init__(self, embed_dim, vocab_size, num_layers=4, num_heads=8, dropout=0.1):
+        '''
+        images: (B,3,H,W)
+        return: (B,embed_dim)
+        '''
+        features = self.cnn(images)  # (B,2048,1,1)
+        features = features.view(features.size(0), -1)  # (B,2048)
+        out = self.fc(features)  # (B,embed_dim)
+        out = self.bn(out)
+        out = self.relu(out)
+        return out
+class Decoder(nn.Module):
+    def __init__(self,vocab_size, embed_dim=512, hidden_dim=512,encoder_dim=512, num_layer=3,pad_idx=0, dropout=0.3):
         super().__init__()
-
-        self.embed_dim = embed_dim
+        
         self.vocab_size = vocab_size
+        self.pad_idx = pad_idx
 
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.pos_embedding = nn.Embedding(500, embed_dim)
+        #LSTM
+        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
+        self.lstm = nn.LSTM(embed_dim, 
+                            hidden_dim, 
+                            num_layers=num_layer,
+                            batch_first=True, 
+                            dropout=dropout)
+        
+        self.fc = nn.Linear(hidden_dim, vocab_size)
 
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=2048,
-            dropout=dropout,
-            batch_first=True
-        )
+        self.init_h = nn.Linear(encoder_dim, hidden_dim)
+        self.init_c = nn.Linear(encoder_dim, hidden_dim)
+        self.num_layers = num_layer
 
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        self.fc_out = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, captions, memory):
-        """
-        captions: [B, T]
-        memory:   [B, 1, E]  (encoder output)
-        """
-        B, T = captions.size()
+    def forward(self, captions, features):
+        '''
+        captions: (B, max_len)
+        features: (B, encoder_dim)
+        return logit: (B, max_len, vocab_size)
+        '''
+        # embedding token
+        embeddings = self.embed(captions)  # (B, max_len, embed_dim)
 
-        positions = torch.arange(0, T, device=captions.device).unsqueeze(0)
-        tgt = self.embedding(captions) + self.pos_embedding(positions)
+        h0 = self.init_h(features)  # (B, hidden_dim)
+        c0 = self.init_c(features)  # (B, hidden_dim)
 
-        # mask decoder
-        causal_mask = nn.Transformer.generate_square_subsequent_mask(T).to(captions.device)
+        # expand to (num_layers, B, hidden_dim)
+        h0 = h0.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c0 = c0.unsqueeze(0).repeat(self.num_layers, 1, 1)
 
-        out = self.decoder(
-            tgt=tgt,
-            memory=memory,
-            tgt_mask=causal_mask
-        )  # [B, T, E]
+        #LSTM Output
+        lstm_out, _ = self.lstm(embeddings, (h0, c0))  # (B, max_len, hidden_dim)
 
-        logits = self.fc_out(out)  # [B, T, vocab]
+        # predict token
+        logits = self.fc(lstm_out)  # (B, max_len, vocab_size)
+
         return logits
 
-
-# IMAGE CAPTIONING MODEL
-class ImageCaptioningModel(nn.Module):
-    def __init__(self, vocab_size, embed_dim=512, train_last_block=False):
-        super().__init__()
-
-        self.encoder = ViTEncoder(embed_dim, train_last_block=train_last_block)
-        self.decoder = TransformerCaptionDecoder(embed_dim, vocab_size)
-
-    def forward(self, images, captions):
-        memory = self.encoder(images)      # [B, 1, E]
-        outputs = self.decoder(captions, memory)
-        return outputs
