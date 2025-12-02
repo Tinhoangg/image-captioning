@@ -11,13 +11,13 @@ MAX_LEN = 20
 NUM_EXAMPLES = 5  # số ảnh in ví dụ
 
 # ===== Load vocab =====
-with open("data/word2idx.json", "r", encoding="utf-8") as f:
+with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f:
     w2i = json.load(f)
 i2w = {v:k for k,v in w2i.items()}
 vocab_size = len(w2i)
 
 # ===== Load test dataset =====
-test_dataset = CaptionDataset("data/processed/test", "data/captions_img.json", w2i)
+test_dataset = CaptionDataset("/kaggle/input/caption-img/processed/test", "/kaggle/input/caption-img/captions_img.json", w2i)
 
 def collate_fn(batch):
     imgs, caps = zip(*batch)

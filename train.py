@@ -26,15 +26,15 @@ def collate_fn(batch):
     return imgs, caps
 
 # ======= LOAD VOCAB =======
-with open("data/word2idx.json", "r", encoding="utf-8") as f:
+with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f:
     w2i = json.load(f)
 
 vocab_size = len(w2i)
 print("Vocab size:", vocab_size)
 
 # ======= LOAD DATA =======
-train_dataset = CaptionDataset("data/processed/train", "data/captions_img.json", w2i)
-val_dataset   = CaptionDataset("data/processed/val", "data/captions_img.json", w2i)
+train_dataset = CaptionDataset("/kaggle/input/caption-img/processed/train", "/kaggle/input/caption-img/captions_img.json", w2i)
+val_dataset   = CaptionDataset("/kaggle/input/caption-img/processed/val", "/kaggle/input/caption-img/captions_img.json", w2i)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
