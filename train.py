@@ -6,7 +6,7 @@ import torch.optim as optim
 from dataset import CaptionDataset
 from model import Encoder, Decoder   # chỉnh lại nếu khác
 import json
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # ======= CONFIG =======
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,7 +47,7 @@ decoder = Decoder(vocab_size=vocab_size, pad_idx=PAD_IDX).to(DEVICE)
 
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=LR)
-scheduler = StepLR(optimizer,factor=0.7, mode='min', patience=4, verbose=True)
+scheduler = ReduceLROnPlateau(optimizer,factor=0.7, mode='min', patience=4, verbose=True)
 
 
 # ======= TRAIN ONE EPOCH =======
