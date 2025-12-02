@@ -6,6 +6,7 @@ import torch.optim as optim
 from dataset import CaptionDataset
 from model import Encoder, Decoder   # chỉnh lại nếu khác
 import json
+from torch.optim.lr_scheduler import StepLR
 
 # ======= CONFIG =======
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -14,6 +15,7 @@ LR = 1e-4
 EPOCHS = 50
 PAD_IDX = 0
 SAVE_PATH = "best_model.pt"
+print("device:", DEVICE)
 
 # ======= COLLATE FN =======
 def collate_fn(batch):
@@ -45,6 +47,7 @@ decoder = Decoder(vocab_size=vocab_size, pad_idx=PAD_IDX).to(DEVICE)
 
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=LR)
+scheduler = StepLR(optimizer,factor=0.7, mode='min', patience=4, verbose=True)
 
 
 # ======= TRAIN ONE EPOCH =======
@@ -108,8 +111,9 @@ for epoch in range(1, EPOCHS + 1):
 
     train_loss = train_one_epoch(epoch)
     val_loss = validate()
+    scheduler.step(val_loss)
 
-    print(f"Epoch {epoch} - Val Loss: {val_loss:.4f}")
+    print(f"Epoch {epoch} - Val Loss: {val_loss:.4f} - lr: {optimizer.param_groups[0]['lr']}")
 
     # save best model
     if val_loss < best_val:
