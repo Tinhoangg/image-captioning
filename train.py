@@ -8,32 +8,29 @@ from model import ViTEncoder as Encoder, Decoder
 import json
 from tqdm import tqdm
 import warnings
-
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore")
 
 # ==================== SETTINGS ====================
 BATCH_SIZE = 32
 PAD_IDX = 0
-NUM_EPOCHS = 10
-EMBED_SIZE = 256
-HIDDEN_DIM = 512
+EPOCHS = 10
+EMBED = 256
+HIDDEN = 512
 
 # ==================== LOAD DATA ====================
 captions_json = "/kaggle/input/caption-img/captions_img.json"
-with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f:
+with open("/kaggle/input/caption-img/word2idx.json","r",encoding="utf-8") as f:
     w2i = json.load(f)
-idx2w = {v: k for k, v in w2i.items()}
+idx2w = {v:k for k,v in w2i.items()}
 
 train_data = CaptionDataset("/kaggle/input/caption-img/processed/train", captions_json, w2i)
 val_data   = CaptionDataset("/kaggle/input/caption-img/processed/val", captions_json, w2i)
 
 def collate_fn(batch):
-    imgs, captions = zip(*batch)
-    imgs = torch.stack(imgs, 0)
-    captions = [torch.tensor(c) for c in captions]
-    captions = pad_sequence(captions, batch_first=True, padding_value=PAD_IDX)
-    return imgs, captions
+    imgs, caps = zip(*batch)
+    imgs = torch.stack(imgs)
+    caps = pad_sequence([torch.tensor(c) for c in caps], batch_first=True, padding_value=PAD_IDX)
+    return imgs, caps
 
 train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True,
                           collate_fn=collate_fn, num_workers=2)
@@ -42,79 +39,107 @@ val_loader   = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False,
 
 # ==================== MODEL ====================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-print(f"Vocabulary size: {len(w2i)}")
+print("Device:", device)
 
-encoder = Encoder(embed_dim=EMBED_SIZE).to(device)
-decoder = Decoder(embed_dim=EMBED_SIZE, vocab_size=len(w2i)).to(device)
+encoder = Encoder(embed_dim=EMBED).to(device)
+decoder = Decoder(embed_dim=EMBED, vocab_size=len(w2i)).to(device)
 
-criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-optimizer = optim.AdamW(list(decoder.parameters()) +
-                        list(encoder.proj.parameters()), lr=3e-4)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+# Unfreeze block cuối của ViT → rất quan trọng
+for name, param in encoder.vit.named_parameters():
+    if "encoder.layers.encoder_layer_11" in name or "encoder.layer.11" in name:
+        param.requires_grad = True
+    else:
+        param.requires_grad = False
 
-best_val_loss = float('inf')
+criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
 
-# ==================== TRAINING LOOP ====================
-for epoch in range(NUM_EPOCHS):
+optimizer = optim.AdamW(
+    list(encoder.parameters()) + list(decoder.parameters()),
+    lr=3e-4, weight_decay=1e-4
+)
+
+# Warmup cho Transformer
+def warmup(step, warmup_steps=4000):
+    step = max(step, 1)
+    return min(step ** (-0.5), step * warmup_steps ** (-1.5))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup)
+
+best_val_loss = float("inf")
+global_step = 0
+
+# ==================== TRAIN LOOP ====================
+for epoch in range(EPOCHS):
     encoder.train()
     decoder.train()
     train_loss = 0
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
-    
-    for images, captions in pbar:
+
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
+
+    for images, caps in pbar:
         images = images.to(device)
-        captions = captions.to(device)
+        caps = caps.to(device)
 
         optimizer.zero_grad()
-        tgt_input = captions[:, :-1].transpose(0,1)   # (seq_len, B)
-        target = captions[:, 1:].reshape(-1)          # flatten
 
-        # ===================== Sửa memory shape =====================
-        memory = encoder(images)  # (B, embed_dim)
-        memory = memory.unsqueeze(0)  # (1, B, embed_dim) để phù hợp transformer
+        tgt_in  = caps[:, :-1]       # (B, L-1)
+        tgt_out = caps[:, 1:]        # (B, L-1)
 
-        output = decoder(tgt_input, memory.squeeze(0))
-        loss = criterion(output.reshape(-1, len(w2i)), target)
+        tgt_in  = tgt_in.transpose(0,1)   # (L, B)
+        tgt_out = tgt_out.reshape(-1)
+
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_in.size(0)).to(device)
+        tgt_key_padding = (tgt_in.transpose(0,1) == PAD_IDX)
+
+        memory = encoder(images)          # (B, EMBED)
+        memory = memory.unsqueeze(0)      # (1, B, EMBED)
+
+        logits = decoder(
+            tgt_in, 
+            memory.squeeze(0)
+        )  # (L, B, vocab)
+
+        loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out)
         loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
+
         optimizer.step()
+        scheduler.step()
+        global_step += 1
 
         train_loss += loss.item()
-        pbar.set_postfix({'loss': loss.item()})
-    
+        pbar.set_postfix({"loss": loss.item()})
+
     avg_train_loss = train_loss / len(train_loader)
 
-    # ===================== Validation =====================
+    # ==================== VALIDATION ====================
     encoder.eval()
     decoder.eval()
     val_loss = 0
     with torch.no_grad():
-        for images, captions in val_loader:
+        for images, caps in val_loader:
             images = images.to(device)
-            captions = captions.to(device)
+            caps = caps.to(device)
 
-            tgt_input = captions[:, :-1].transpose(0,1)
-            target = captions[:, 1:].reshape(-1)
+            tgt_in  = caps[:, :-1].transpose(0,1)
+            tgt_out = caps[:, 1:].reshape(-1)
 
-            memory = encoder(images)
-            memory = memory.unsqueeze(0)
+            memory = encoder(images).unsqueeze(0)
+            logits = decoder(tgt_in, memory.squeeze(0))
 
-            output = decoder(tgt_input, memory.squeeze(0))
-            loss = criterion(output.reshape(-1, len(w2i)), target)
+            loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out)
             val_loss += loss.item()
+
     avg_val_loss = val_loss / len(val_loader)
-    scheduler.step(avg_val_loss)
+    print(f"\nEpoch {epoch+1}: Train Loss = {avg_train_loss:.4f} | Val Loss = {avg_val_loss:.4f}")
 
-    print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}] Train Loss: {avg_train_loss:.4f} Val Loss: {avg_val_loss:.4f}")
-
-    # ===================== Save best model =====================
+    # Save model
     if avg_val_loss < best_val_loss:
         best_val_loss = avg_val_loss
         torch.save({
-            'epoch': epoch,
-            'encoder_state_dict': encoder.state_dict(),
-            'decoder_state_dict': decoder.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'val_loss': avg_val_loss,
-        }, 'best_model.pth')
-        print(f"Saved best model with Val Loss: {avg_val_loss:.4f}")
+            "encoder": encoder.state_dict(),
+            "decoder": decoder.state_dict(),
+            "val_loss": avg_val_loss
+        }, "best_vit_caption.pth")
+        print(f"Saved BEST model (Val Loss = {avg_val_loss:.4f})")
