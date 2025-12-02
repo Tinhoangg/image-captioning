@@ -1,76 +1,91 @@
 import torch
-from torchvision import models
 import torch.nn as nn
-import torch.optim as optim
-import math
+from torchvision import models
 
-# Feature extraction
+
+# ENCODER (ViT)
 class ViTEncoder(nn.Module):
-
-    def __init__(self, embed_dim):
+    def __init__(self, embed_dim=512, train_last_block=False):
         super().__init__()
+
         vit = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
-        vit.heads = nn.Identity() # remove classification head
+
+        # remove classification head
+        vit.heads = nn.Identity()
         self.vit = vit
-        self.embed_dim = embed_dim
+
+        # freeze toàn bộ backbone
+        for p in self.vit.parameters():
+            p.requires_grad = False
+
+        # nếu muốn train block cuối
+        if train_last_block:
+            for p in self.vit.encoder.layers[-1].parameters():
+                p.requires_grad = True
+
+        # ViT output = 768 → project về embed_dim
         self.proj = nn.Linear(768, embed_dim)
 
-    def forward(self, x):
-        x = self.vit(x)
-        x = self.proj(x)
-        return x
-    
+    def forward(self, images):
+        feat = self.vit(images)          # [B, 768]
+        feat = self.proj(feat)           # [B, embed_dim]
+        return feat.unsqueeze(1)         # [B, 1, embed_dim] 
 
-# Positional Encoding
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+# DECODER (Transformer)
+class TransformerCaptionDecoder(nn.Module):
+    def __init__(self, embed_dim, vocab_size, num_layers=4, num_heads=8, dropout=0.1):
         super().__init__()
 
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000)/d_model))
+        self.embed_dim = embed_dim
+        self.vocab_size = vocab_size
 
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.pos_embedding = nn.Embedding(500, embed_dim)
 
-        self.pe = pe.unsqueeze(1)
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=2048,
+            dropout=dropout,
+            batch_first=True
+        )
 
-    def forward(self, x):
-        return x + self.pe[:x.size(0)].to(x.device)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.fc_out = nn.Linear(embed_dim, vocab_size)
+
+    def forward(self, captions, memory):
+        """
+        captions: [B, T]
+        memory:   [B, 1, E]  (encoder output)
+        """
+        B, T = captions.size()
+
+        positions = torch.arange(0, T, device=captions.device).unsqueeze(0)
+        tgt = self.embedding(captions) + self.pos_embedding(positions)
+
+        # mask decoder
+        causal_mask = nn.Transformer.generate_square_subsequent_mask(T).to(captions.device)
+
+        out = self.decoder(
+            tgt=tgt,
+            memory=memory,
+            tgt_mask=causal_mask
+        )  # [B, T, E]
+
+        logits = self.fc_out(out)  # [B, T, vocab]
+        return logits
 
 
-
-# Transformer Decoder
-class Decoder(nn.Module):
-    def __init__(self, embed_dim, vocab_size, num_layers=3, num_heads=4, hidden_dim=512, max_len=5000, dropout=0.2):
+# IMAGE CAPTIONING MODEL
+class ImageCaptioningModel(nn.Module):
+    def __init__(self, vocab_size, embed_dim=512, train_last_block=False):
         super().__init__()
-        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        self.pos_enc = PositionalEncoding(d_model=embed_dim, max_len=max_len)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=hidden_dim,dropout=dropout)
-        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers)
 
-        self.fc = nn.Linear (embed_dim, vocab_size)
+        self.encoder = ViTEncoder(embed_dim, train_last_block=train_last_block)
+        self.decoder = TransformerCaptionDecoder(embed_dim, vocab_size)
 
-    def forward(self, tgt, memory):
-        '''
-        tgt: (seq_len, B) token ID input
-        memory: (B, embed_dim) image features
-        '''
-        tgt_emb = self.embed(tgt)       # (seq_len, B, embed_dim)
-        tgt_emb = self.pos_enc(tgt_emb) # add positional encoding
-
-        memory = memory.unsqueeze(0)
-
-        seq_len = tgt_emb.size(0)
-        mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(tgt.device)
-        out = self.transformer_decoder(tgt_emb, 
-                                       memory, 
-                                       tgt_mask=mask)
-        
-        out = self.fc(out)          # (seq_len, B, vocab_size)
-
-        return out
-
-
-
+    def forward(self, images, captions):
+        memory = self.encoder(images)      # [B, 1, E]
+        outputs = self.decoder(captions, memory)
+        return outputs

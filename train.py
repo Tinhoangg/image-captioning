@@ -1,145 +1,155 @@
 import torch
-from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.optim as optim
-from dataset import CaptionDataset
-from model import ViTEncoder as Encoder, Decoder
-import json
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-import warnings
-warnings.filterwarnings("ignore")
 
-# ==================== SETTINGS ====================
-BATCH_SIZE = 32
-PAD_IDX = 0
-EPOCHS = 10
-EMBED = 256
-HIDDEN = 512
+from model import ImageCaptioningModel   # model bạn đã tạo
+from dataset import CaptionDataset       # dataset của bạn
 
-# ==================== LOAD DATA ====================
-captions_json = "/kaggle/input/caption-img/captions_img.json"
-with open("/kaggle/input/caption-img/word2idx.json","r",encoding="utf-8") as f:
-    w2i = json.load(f)
-idx2w = {v:k for k,v in w2i.items()}
 
-train_data = CaptionDataset("/kaggle/input/caption-img/processed/train", captions_json, w2i)
-val_data   = CaptionDataset("/kaggle/input/caption-img/processed/val", captions_json, w2i)
+# ------------------------------
+# MAKE PAD MASK
+# ------------------------------
+def create_masks(captions, pad_idx):
+    """
+    captions: [B, T]
+    """
+    # target mask để decoder không nhìn tương lai
+    T = captions.size(1)
+    causal_mask = nn.Transformer.generate_square_subsequent_mask(T).to(captions.device)
 
-def collate_fn(batch):
-    imgs, caps = zip(*batch)
-    imgs = torch.stack(imgs)
-    caps = pad_sequence([torch.tensor(c) for c in caps], batch_first=True, padding_value=PAD_IDX)
-    return imgs, caps
+    # padding mask: 1 = pad, 0 = real token
+    pad_mask = (captions == pad_idx)  # [B, T]
 
-train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True,
-                          collate_fn=collate_fn, num_workers=2)
-val_loader   = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False,
-                          collate_fn=collate_fn, num_workers=2)
+    return causal_mask, pad_mask
 
-# ==================== MODEL ====================
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device:", device)
 
-encoder = Encoder(embed_dim=EMBED).to(device)
-decoder = Decoder(embed_dim=EMBED, vocab_size=len(w2i)).to(device)
+# ------------------------------
+# TRAIN ONE EPOCH
+# ------------------------------
+def train_one_epoch(model, dataloader, optimizer, criterion, pad_idx):
+    model.train()
+    total_loss = 0
 
-# Unfreeze block cuối của ViT → rất quan trọng
-for name, param in encoder.vit.named_parameters():
-    if "encoder.layers.encoder_layer_11" in name or "encoder.layer.11" in name:
-        param.requires_grad = True
-    else:
-        param.requires_grad = False
-
-criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
-
-optimizer = optim.AdamW(
-    list(encoder.parameters()) + list(decoder.parameters()),
-    lr=3e-4, weight_decay=1e-4
-)
-
-# Warmup cho Transformer
-def warmup(step, warmup_steps=4000):
-    step = max(step, 1)
-    return min(step ** (-0.5), step * warmup_steps ** (-1.5))
-
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=warmup)
-
-best_val_loss = float("inf")
-global_step = 0
-
-# ==================== TRAIN LOOP ====================
-for epoch in range(EPOCHS):
-    encoder.train()
-    decoder.train()
-    train_loss = 0
-
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
-
-    for images, caps in pbar:
+    for images, captions in tqdm(dataloader, desc="Training"):
         images = images.to(device)
-        caps = caps.to(device)
+        captions = captions.to(device)
+
+        # Input = tất cả trừ token cuối
+        # Target = tất cả trừ token đầu
+        inputs = captions[:, :-1]
+        targets = captions[:, 1:]
 
         optimizer.zero_grad()
 
-        tgt_in  = caps[:, :-1]       # (B, L-1)
-        tgt_out = caps[:, 1:]        # (B, L-1)
+        outputs = model(images, inputs)  # [B, T, vocab]
 
-        tgt_in  = tgt_in.transpose(0,1)   # (L, B)
-        tgt_out = tgt_out.reshape(-1)
+        loss = criterion(outputs.reshape(-1, outputs.size(-1)),
+                         targets.reshape(-1))
 
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_in.size(0)).to(device)
-        tgt_key_padding = (tgt_in.transpose(0,1) == PAD_IDX)
-
-        memory = encoder(images)          # (B, EMBED)
-        memory = memory.unsqueeze(0)      # (1, B, EMBED)
-
-        logits = decoder(
-            tgt_in, 
-            memory.squeeze(0)
-        )  # (L, B, vocab)
-
-        loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out)
         loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
-
         optimizer.step()
-        scheduler.step()
-        global_step += 1
 
-        train_loss += loss.item()
-        pbar.set_postfix({"loss": loss.item()})
+        total_loss += loss.item()
 
-    avg_train_loss = train_loss / len(train_loader)
+    return total_loss / len(dataloader)
 
-    # ==================== VALIDATION ====================
-    encoder.eval()
-    decoder.eval()
-    val_loss = 0
+
+# ------------------------------
+# VALIDATION
+# ------------------------------
+def validate(model, dataloader, criterion, pad_idx):
+    model.eval()
+    total_loss = 0
+
     with torch.no_grad():
-        for images, caps in val_loader:
+        for images, captions in tqdm(dataloader, desc="Validating"):
             images = images.to(device)
-            caps = caps.to(device)
+            captions = captions.to(device)
 
-            tgt_in  = caps[:, :-1].transpose(0,1)
-            tgt_out = caps[:, 1:].reshape(-1)
+            inputs = captions[:, :-1]
+            targets = captions[:, 1:]
 
-            memory = encoder(images).unsqueeze(0)
-            logits = decoder(tgt_in, memory.squeeze(0))
+            outputs = model(images, inputs)
 
-            loss = criterion(logits.reshape(-1, logits.size(-1)), tgt_out)
-            val_loss += loss.item()
+            loss = criterion(outputs.reshape(-1, outputs.size(-1)),
+                             targets.reshape(-1))
 
-    avg_val_loss = val_loss / len(val_loader)
-    print(f"\nEpoch {epoch+1}: Train Loss = {avg_train_loss:.4f} | Val Loss = {avg_val_loss:.4f}")
+            total_loss += loss.item()
 
-    # Save model
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        torch.save({
-            "encoder": encoder.state_dict(),
-            "decoder": decoder.state_dict(),
-            "val_loss": avg_val_loss
-        }, "best_vit_caption.pth")
-        print(f"Saved BEST model (Val Loss = {avg_val_loss:.4f})")
+    return total_loss / len(dataloader)
+
+
+# ------------------------------
+# MAIN TRAIN LOOP
+# ------------------------------
+if __name__ == "__main__":
+    # ----------------
+    # CONFIG
+    # ----------------
+    BATCH_SIZE = 32
+    EPOCHS = 10
+    LR = 1e-4
+    PAD_IDX = 0
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ----------------
+    # LOAD VOCAB
+    # ----------------
+    import json
+    with open("/kaggle/input/caption-img/word2idx.json", "r") as f:
+        w2i = json.load(f)
+    vocab_size = len(w2i)
+
+    # ----------------
+    # DATASET
+    # ----------------
+    train_data = CaptionDataset(
+        "/kaggle/input/caption_img/processed/train",
+        "/kaggle/input/caption-img/captions_img.json",
+        w2i
+    )
+    val_data = CaptionDataset(
+        "/kaggle/input/caption_img/processed/val",
+        "/kaggle/input/caption-img/captions_img.json",
+        w2i
+    )
+
+    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader   = DataLoader(val_data,   batch_size=BATCH_SIZE)
+
+    # ----------------
+    # MODEL
+    # ----------------
+    model = ImageCaptioningModel(
+        vocab_size=vocab_size,
+        embed_dim=512,
+        train_last_block=False
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    # ----------------
+    # TRAINING LOOP
+    # ----------------
+    best_val_loss = float("inf")
+
+    for epoch in range(1, EPOCHS + 1):
+        print(f"\n===== EPOCH {epoch}/{EPOCHS} =====")
+
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, PAD_IDX)
+        val_loss   = validate(model, val_loader, criterion, PAD_IDX)
+
+        print(f"Train Loss: {train_loss:.4f}")
+        print(f"Val   Loss: {val_loss:.4f}")
+
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "best_model.pth")
+            print(">>> Saved best model!")
+
+    print("Training complete.")
