@@ -106,7 +106,6 @@ def validate():
 
 # TRAIN LOOP
 best_val = 1e9
-
 for epoch in range(1, EPOCHS + 1):
 
     train_loss = train_one_epoch(epoch)
