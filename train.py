@@ -4,11 +4,11 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 from dataset import CaptionDataset
-from model import Encoder, Decoder   # chỉnh lại nếu khác
+from model import Encoder, Decoder   
 import json
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# ======= CONFIG =======
+# CONFIG
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 32
 LR = 1e-4
@@ -17,7 +17,7 @@ PAD_IDX = 0
 SAVE_PATH = "best_model.pt"
 print("device:", DEVICE)
 
-# ======= COLLATE FN =======
+# COLLATE FN
 def collate_fn(batch):
     imgs, caps = zip(*batch)
     imgs = torch.stack(imgs)
@@ -27,30 +27,30 @@ def collate_fn(batch):
 
     return imgs, caps
 
-# ======= LOAD VOCAB =======
+# LOAD VOCAB
 with open("/kaggle/input/caption-img/word2idx.json", "r", encoding="utf-8") as f:
     w2i = json.load(f)
 
 vocab_size = len(w2i)
 print("Vocab size:", vocab_size)
 
-# ======= LOAD DATA =======
+# LOAD DATA
 train_dataset = CaptionDataset("/kaggle/input/caption-img/processed/train", "/kaggle/input/caption-img/captions_img.json", w2i)
 val_dataset   = CaptionDataset("/kaggle/input/caption-img/processed/val", "/kaggle/input/caption-img/captions_img.json", w2i)
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
 val_loader   = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
-# ======= MODEL =======
+#  MODEL 
 encoder = Encoder().to(DEVICE)
 decoder = Decoder(vocab_size=vocab_size, pad_idx=PAD_IDX).to(DEVICE)
 
 criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=LR)
+optimizer = optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()), lr=LR, weight_decay=1e-4)
 scheduler = ReduceLROnPlateau(optimizer,factor=0.7, mode='min', patience=4, verbose=True)
 
 
-# ======= TRAIN ONE EPOCH =======
+# TRAIN ONE EPOCH
 def train_one_epoch(epoch):
     encoder.train()
     decoder.train()
@@ -80,7 +80,7 @@ def train_one_epoch(epoch):
     return running_loss / len(train_loader)
 
 
-# ======= VALIDATION =======
+# VALIDATION
 def validate():
     encoder.eval()
     decoder.eval()
@@ -104,7 +104,7 @@ def validate():
     return val_loss / len(val_loader)
 
 
-# ======= TRAIN LOOP =======
+# TRAIN LOOP
 best_val = 1e9
 
 for epoch in range(1, EPOCHS + 1):
@@ -124,4 +124,3 @@ for epoch in range(1, EPOCHS + 1):
         }, SAVE_PATH)
         print(" Saved Best Model")
 
-print("Done Training!")

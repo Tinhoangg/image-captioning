@@ -49,3 +49,30 @@ class CaptionDataset(Dataset):
         token_ids = torch.tensor(token_ids, dtype=torch.long)
         
         return img_tensor, token_ids
+    
+    def collate_fn(self, batch):
+        """
+        batch: list of (img_tensor, token_ids)
+        Return:
+            imgs: (B, 3, H, W)
+            captions: (B, max_len)
+        """
+
+        imgs = [item[0] for item in batch]
+        captions = [item[1] for item in batch]
+
+        # pad
+        pad_idx = self.w2i["<pad>"]
+        max_len = max(len(c) for c in captions)
+
+        padded_captions = []
+        for c in captions:
+            num_pad = max_len - len(c)
+            padded = torch.cat([c, torch.full((num_pad,), pad_idx, dtype=torch.long)])
+            padded_captions.append(padded)
+
+        imgs = torch.stack(imgs)                   # (B, 3, H, W)
+        captions = torch.stack(padded_captions)    # (B, max_len)
+
+        return imgs, captions
+
